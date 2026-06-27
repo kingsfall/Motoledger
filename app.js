@@ -1454,7 +1454,7 @@ function renderLockedMotorcycleProfile() {
           <div class="profile-fact-grid">
             ${profileFact("Current mileage", formatKm(state.bike.currentMileage))}
             ${profileFact("Plate", state.bike.plate || "Not set")}
-            ${profileFact("VIN", state.bike.vin || "Not set")}
+            ${profileFact("VIN / Chassis number", state.bike.vin || "Not set")}
             ${profileFact("Acquired", formatDate(state.bike.acquiredDate))}
             ${profileFact("Monthly use", formatKm(state.bike.monthlyMileage || 0))}
             ${profileFact("Currency", state.bike.currency || "USD")}
@@ -1547,7 +1547,7 @@ function renderMotorcycleProfileForm(makes, models, generations, selectedGenerat
         </label>
         ${field("Year", "year", state.bike.year, "number")}
         ${field("Plate", "plate", state.bike.plate, "text")}
-        ${field("VIN", "vin", state.bike.vin, "text")}
+        ${field("VIN / Chassis number", "vin", state.bike.vin, "text")}
         ${field("Acquired date", "acquiredDate", state.bike.acquiredDate, "date")}
         ${field("Mileage at acquisition", "baselineMileage", state.bike.baselineMileage, "number")}
         ${field("Current mileage", "currentMileage", state.bike.currentMileage, "number")}
@@ -2386,7 +2386,7 @@ function insertBikePrompts(button) {
     "What year, brand, and model is your motorcycle?",
     "What nickname should Motoledger use for it?",
     "What is the current odometer reading?",
-    "What is the plate number and VIN, if available?",
+    "What is the plate number and VIN / chassis number, if available?",
     "When did you acquire it, and what was the mileage then?",
     "Roughly how many km do you ride each month?",
     "Which currency should service costs use?"
@@ -2398,7 +2398,7 @@ function insertBikePrompts(button) {
 function useSampleBikeImport(button) {
   const textarea = button.closest("form")?.querySelector('textarea[name="bikeBlob"]');
   if (!textarea) return;
-  textarea.value = "2021 Yamaha MT-07 named Daily Rider. Plate ML-7421, VIN JYARM32E0MA000123. Current odometer is 18,420 km. Bought on 2024-01-12 at 9,500 km. I ride about 720 km per month and pay service bills in SGD.";
+  textarea.value = "2021 Yamaha MT-07 named Daily Rider. Plate ML-7421, VIN / chassis number JYARM32E0MA000123. Current odometer is 18,420 km. Bought on 2024-01-12 at 9,500 km. I ride about 720 km per month and pay service bills in SGD.";
   previewBikeImport(button);
 }
 
@@ -2515,7 +2515,7 @@ function renderBikeImportPreview(parsed) {
     model: "Model",
     year: "Year",
     plate: "Plate",
-    vin: "VIN",
+    vin: "VIN / Chassis number",
     acquiredDate: "Acquired date",
     baselineMileage: "Mileage at acquisition",
     currentMileage: "Current mileage",
@@ -2527,7 +2527,7 @@ function renderBikeImportPreview(parsed) {
   if (!entries.length) {
     return `
       <strong>No fields detected yet.</strong>
-      <p class="muted">Try including the year, make, model, odometer, plate, VIN, acquisition date, acquisition mileage, monthly mileage, or currency.</p>
+      <p class="muted">Try including the year, make, model, odometer, plate, VIN / chassis number, acquisition date, acquisition mileage, monthly mileage, or currency.</p>
     `;
   }
 
@@ -3505,7 +3505,7 @@ function buildSaleReportHtml() {
 </head>
 <body>
   <h1>${escapeHtml(state.bike.year)} ${escapeHtml(state.bike.make)} ${escapeHtml(state.bike.model)}</h1>
-  <p><strong>Plate:</strong> ${escapeHtml(state.bike.plate || "Not set")} | <strong>VIN:</strong> ${escapeHtml(state.bike.vin || "Not set")} | <strong>Mileage:</strong> ${formatKm(state.bike.currentMileage)}</p>
+  <p><strong>Plate:</strong> ${escapeHtml(state.bike.plate || "Not set")} | <strong>VIN / Chassis number:</strong> ${escapeHtml(state.bike.vin || "Not set")} | <strong>Mileage:</strong> ${formatKm(state.bike.currentMileage)}</p>
   <p><span class="pill">Health score ${health.score}/100 - ${health.label}</span></p>
   <h2>Service records</h2>
   <table>
