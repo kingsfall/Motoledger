@@ -2,6 +2,27 @@ const STORAGE_KEY = "motoledger_state_v1";
 const ACCOUNT_SESSION_KEY = "motoledger_account_session_v1";
 const ACCOUNT_INDEX_KEY = "motoledger_accounts_v1";
 const ACCOUNT_STATE_PREFIX = "motoledger_account_state_v1_";
+const BACKEND_SYNC_STATUS_KEY = "motoledger_backend_sync_status_v1";
+const COMMON_SERVICE_ACTION_NAMES = [
+  "Engine oil and filter change",
+  "Chain clean, lubrication and slack adjustment",
+  "Air filter replacement",
+  "Front brake pad replacement"
+];
+const ACCESSORY_ACTIONS = [
+  accessoryAction("Exhaust pipe / slip-on installation", "Performance", "Record aftermarket exhaust, slip-on muffler, or full-system replacement."),
+  accessoryAction("Top box installation", "Storage", "Record top box, top case, mounting plate, and rack installation."),
+  accessoryAction("Side panniers / luggage rack installation", "Storage", "Record panniers, side boxes, soft luggage mounts, or luggage racks."),
+  accessoryAction("Steering damper installation", "Handling", "Record steering damper or stabilizer installation."),
+  accessoryAction("Suspension / shock upgrade", "Handling", "Record aftermarket rear shock, fork cartridge, or suspension damper upgrade."),
+  accessoryAction("Crash bars / frame sliders installation", "Protection", "Record crash bars, frame sliders, axle sliders, or engine guards."),
+  accessoryAction("Windshield / windscreen installation", "Comfort", "Record windscreen, touring screen, or deflector installation."),
+  accessoryAction("Auxiliary lights installation", "Electrical", "Record auxiliary lights, fog lights, or spot lights."),
+  accessoryAction("Phone mount / USB charger installation", "Electrical", "Record phone mount, USB charger, navigation mount, or wiring."),
+  accessoryAction("Seat replacement / comfort seat", "Comfort", "Record replacement seat, comfort seat, or upholstery change."),
+  accessoryAction("Handlebar / lever upgrade", "Controls", "Record handlebar, riser, clutch lever, or brake lever changes."),
+  accessoryAction("ECU tune / fuel mapping", "Performance", "Record ECU tune, fuel map, piggyback controller, or remap.")
+];
 
 const maintenanceTemplates = {
   Honda: {
@@ -488,11 +509,11 @@ const starterState = {
       mileage: 15120,
       mileageSource: "manual",
       workshop: "Apex Moto Works",
-      tasks: ["Engine oil and filter", "Brake system inspection", "Chain clean, slack, and lubrication"],
+      tasks: ["Engine oil and filter change", "Front brake pad replacement", "Chain clean, lubrication and slack adjustment"],
       taskItems: [
-        { name: "Engine oil and filter", type: "template", cost: 118 },
-        { name: "Brake system inspection", type: "template", cost: 28 },
-        { name: "Chain clean, slack, and lubrication", type: "template", cost: 22 }
+        { name: "Engine oil and filter change", type: "service-action", maintenanceTask: "Engine oil and filter", cost: 118 },
+        { name: "Front brake pad replacement", type: "service-action", maintenanceTask: "Brake system inspection", cost: 28 },
+        { name: "Chain clean, lubrication and slack adjustment", type: "service-action", maintenanceTask: "Chain clean, slack, and lubrication", cost: 22 }
       ],
       cost: 168,
       attachments: {},
@@ -504,10 +525,10 @@ const starterState = {
       mileage: 17180,
       mileageSource: "manual",
       workshop: "Northside Garage",
-      tasks: ["Chain clean, slack, and lubrication", "Tyre and chassis inspection"],
+      tasks: ["Chain clean, lubrication and slack adjustment", "Rear tyre change"],
       taskItems: [
-        { name: "Chain clean, slack, and lubrication", type: "template", cost: 22 },
-        { name: "Tyre and chassis inspection", type: "custom", cost: 20 }
+        { name: "Chain clean, lubrication and slack adjustment", type: "service-action", maintenanceTask: "Chain clean, slack, and lubrication", cost: 22 },
+        { name: "Rear tyre change", type: "service-action", maintenanceTask: "Tyre and chassis inspection", cost: 20 }
       ],
       cost: 42,
       attachments: {},
@@ -522,6 +543,8 @@ let state = loadState();
 let activeView = "dashboard";
 let mileagePanelOpen = false;
 let motorcycleProfileEditing = false;
+let backendAuthAvailable = false;
+let backendStateSyncTimer = null;
 let toastTimer = null;
 
 const app = document.getElementById("app");
@@ -758,6 +781,9 @@ function normalizeServiceRecord(record) {
     ? record.taskItems.map((item) => ({
       name: item.name || "Service item",
       type: item.type || "custom",
+      maintenanceTask: item.maintenanceTask || "",
+      category: item.category || "",
+      remark: item.remark || "",
       cost: Number(item.cost || 0)
     }))
     : tasks.map((name) => ({ name, type: "legacy", cost: 0 }));
@@ -775,6 +801,70 @@ function normalizeServiceRecord(record) {
 
 function saveState() {
   localStorage.setItem(getStateStorageKey(), JSON.stringify(state));
+  scheduleBackendStateSync();
+}
+
+function saveStateLocalOnly() {
+  localStorage.setItem(getStateStorageKey(), JSON.stringify(state));
+}
+
+function scheduleBackendStateSync() {
+  if (!backendAuthAvailable || !currentUser) return;
+  clearTimeout(backendStateSyncTimer);
+  backendStateSyncTimer = setTimeout(syncBackendState, 500);
+}
+
+async function syncBackendState() {
+  if (!backendAuthAvailable || !currentUser) return;
+  try {
+    const payload = await apiRequest("/api/users/me/state", {
+      method: "PUT",
+      body: { state }
+    });
+    localStorage.setItem(BACKEND_SYNC_STATUS_KEY, JSON.stringify({
+      ok: true,
+      syncedAt: new Date().toISOString(),
+      motorcycles: payload.resources?.motorcycles?.length || 0,
+      logRecords: payload.resources?.logRecords?.length || 0
+    }));
+  } catch (error) {
+    localStorage.setItem(BACKEND_SYNC_STATUS_KEY, JSON.stringify({ ok: false, message: error.message, failedAt: new Date().toISOString() }));
+  }
+}
+
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    method: options.method || "GET",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {})
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined
+  });
+  const text = await response.text();
+  const payload = text ? parseApiJson(text) : {};
+
+  if (!response.ok) {
+    const error = new Error(payload.message || `Request failed with status ${response.status}`);
+    error.status = response.status;
+    error.code = payload.error || "API_ERROR";
+    throw error;
+  }
+
+  return payload;
+}
+
+function parseApiJson(text) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    return {};
+  }
+}
+
+function isBackendUnavailable(error) {
+  return error instanceof TypeError || error.status === 404 || error.status === 405;
 }
 
 function formatKm(value) {
@@ -796,6 +886,15 @@ function getRecordTaskNames(record) {
   return getRecordLineItems(record).map((item) => item.name);
 }
 
+function recordMatchesMaintenanceTask(record, taskName) {
+  const target = taskName.toLowerCase();
+  return getRecordLineItems(record).some((item) => {
+    const itemName = String(item.name || "").toLowerCase();
+    const maintenanceTask = String(item.maintenanceTask || "").toLowerCase();
+    return itemName === target || maintenanceTask === target;
+  });
+}
+
 function getRecordCost(record) {
   const itemizedTotal = getRecordLineItems(record).reduce((sum, item) => sum + Number(item.cost || 0), 0);
   return itemizedTotal || Number(record.cost || 0);
@@ -803,7 +902,12 @@ function getRecordCost(record) {
 
 function getRecordLineItemSummary(record) {
   return getRecordLineItems(record)
-    .map((item) => item.cost ? `${item.name} (${formatMoney(item.cost)})` : item.name)
+    .map((item) => {
+      const typeLabel = lineItemTypeLabel(item);
+      const label = typeLabel ? `${item.name} [${typeLabel}]` : item.name;
+      const remark = item.remark ? ` - ${item.remark}` : "";
+      return item.cost ? `${label}${remark} (${formatMoney(item.cost)})` : `${label}${remark}`;
+    })
     .join(", ");
 }
 
@@ -962,10 +1066,7 @@ function sortedRecords() {
 }
 
 function lastRecordForTask(taskName) {
-  const target = taskName.toLowerCase();
-  return sortedRecords().find((record) => {
-    return getRecordTaskNames(record).some((item) => item.toLowerCase() === target);
-  });
+  return sortedRecords().find((record) => recordMatchesMaintenanceTask(record, taskName));
 }
 
 function forecastForTask(templateTask) {
@@ -1090,7 +1191,7 @@ function render() {
         </div>
         <div class="toolbar">
           <button class="button" data-action="quick-mileage">Update mileage</button>
-          <button class="button primary" data-view="service">Add service</button>
+          <button class="button primary" data-view="service">Add log</button>
         </div>
       </header>
       ${mileagePanelOpen ? renderMileagePanel() : ""}
@@ -1129,7 +1230,7 @@ function viewMeta() {
       glyph: "D",
       kicker: "Garage overview",
       title: "Know what your bike needs next",
-      subtitle: "Track mileage, service records, workshops, and upcoming maintenance from one working dashboard."
+      subtitle: "Track mileage, accessory/service records, workshops, and upcoming maintenance from one working dashboard."
     },
     motorcycle: {
       label: "Motorcycle",
@@ -1139,18 +1240,18 @@ function viewMeta() {
       subtitle: "Select the brand and model, then Motoledger applies a typical maintenance schedule that can be refined with manual notes."
     },
     service: {
-      label: "Log service",
+      label: "Add log",
       glyph: "S",
-      kicker: "Workshop entry",
-      title: "Add a service record",
-      subtitle: "Capture one workshop visit with service tasks, itemized cost, invoice proof, and dash-photo mileage."
+      kicker: "Log entry",
+      title: "Add accessory / service record",
+      subtitle: "Capture one workshop or installer visit with service work, accessories, modifications, cost, proof, and dash-photo mileage."
     },
     history: {
-      label: "History",
+      label: "Accessory / Service Log",
       glyph: "H",
-      kicker: "Service records",
-      title: "Service history and bulk import",
-      subtitle: "Review past workshop visits, import older records from text, and keep resale-ready maintenance proof."
+      kicker: "Ownership records",
+      title: "Accessory / Service Log",
+      subtitle: "Review workshop visits, accessories, modifications, imports, and resale-ready ownership proof."
     },
     forecast: {
       label: "Forecast",
@@ -1164,14 +1265,14 @@ function viewMeta() {
       glyph: "A",
       kicker: "AI-ready copilot",
       title: "Ask maintenance questions",
-      subtitle: "A rule-based assistant uses the selected model, service records, and manual notes now; it is ready to connect to a real AI backend later."
+      subtitle: "A rule-based assistant uses the selected model, accessory/service records, and manual notes now; it is ready to connect to a real AI backend later."
     },
     transfer: {
       label: "Transfer",
       glyph: "T",
       kicker: "Ownership handover",
-      title: "Export service proof for the next owner",
-      subtitle: "Download a transferable maintenance package or printable ownership report when selling the motorcycle."
+      title: "Export ownership proof for the next owner",
+      subtitle: "Download a transferable ownership package or printable ownership report when selling the motorcycle."
     },
     account: {
       label: "Account",
@@ -1210,7 +1311,7 @@ function renderDashboard() {
         ${statCard("Current mileage", formatKm(state.bike.currentMileage), getLatestMileageEvidence())}
         ${statCard("Health score", `${health.score}/100`, health.label)}
         ${statCard("Next service", nextPack.label, `${nextPack.tasks.length} item${nextPack.tasks.length === 1 ? "" : "s"} in the pack`)}
-        ${statCard("Service spend", formatMoney(totalSpend), `${state.serviceRecords.length} records captured`)}
+        ${statCard("Log spend", formatMoney(totalSpend), `${state.serviceRecords.length} records captured`)}
       </section>
 
       <section class="panel pad health-panel">
@@ -1250,8 +1351,8 @@ function renderDashboard() {
         <div class="panel pad">
           <div class="section-title">
             <div>
-              <h2>Recent workshop history</h2>
-              <p>Latest service records for this motorcycle.</p>
+              <h2>Recent log history</h2>
+              <p>Latest accessory and service records for this motorcycle.</p>
             </div>
           </div>
           ${recentRecords.length ? renderTimeline(recentRecords) : `<div class="empty">No records yet. Add the first workshop visit to start building resale history.</div>`}
@@ -1314,7 +1415,7 @@ function renderBikeDashboardCard() {
         </div>
         <div class="form-actions bike-hero-actions">
           <button class="button small" data-view="motorcycle">Edit profile</button>
-          <button class="button small primary" data-view="service">Log service</button>
+          <button class="button small primary" data-view="service">Add log</button>
         </div>
       </div>
     </section>
@@ -1620,22 +1721,115 @@ function renderTemplateTable(template) {
   `;
 }
 
+function getServiceActions() {
+  return [
+    serviceAction("Engine oil and filter change", "Engine", ["Engine oil and filter"], "Drain engine oil, replace engine oil filter, and refill with correct grade."),
+    serviceAction("Air filter replacement", "Intake", ["Air filter replacement", "Air filter inspection"], "Replace paper or disposable air filter."),
+    serviceAction("Air filter recharge / clean and oil", "Intake", ["Air filter replacement", "Air filter inspection"], "Clean, dry, and re-oil reusable foam or cotton filter."),
+    serviceAction("Throttle body cleaning", "Intake", [], "Clean throttle body, butterfly area, and idle air passages where applicable."),
+    serviceAction("Spark plug replacement", "Ignition", ["Spark plug replacement"], "Replace spark plugs and check plug condition."),
+    serviceAction("Coolant flush and replacement", "Cooling", ["Coolant replacement"], "Flush old coolant and refill/bleed the cooling system."),
+    serviceAction("Valve clearance adjustment", "Engine", ["Valve clearance inspection"], "Measure and adjust valve clearance where required."),
+    serviceAction("Desmo service", "Engine", ["Desmo service inspection"], "Perform Ducati desmo valve service and related belt checks where applicable."),
+    serviceAction("Chain clean, lubrication and slack adjustment", "Final drive", ["Chain clean, slack, and lubrication"], "Clean chain, lubricate, and set slack."),
+    serviceAction("Chain and sprocket replacement", "Final drive", ["Chain clean, slack, and lubrication"], "Replace chain and sprocket set."),
+    serviceAction("Drive belt adjustment / replacement", "Final drive", ["Drive belt inspection"], "Adjust or replace drive belt where fitted."),
+    serviceAction("Final drive oil change", "Final drive", ["Final drive oil change"], "Replace shaft final drive oil."),
+    serviceAction("Brake fluid bleeding / replacement", "Brakes", ["Brake fluid replacement"], "Bleed brake system and replace old brake fluid."),
+    serviceAction("Front brake pad replacement", "Brakes", ["Brake system inspection"], "Replace front brake pads."),
+    serviceAction("Rear brake pad replacement", "Brakes", ["Brake system inspection"], "Replace rear brake pads."),
+    serviceAction("Brake disc replacement", "Brakes", ["Brake system inspection"], "Replace worn or damaged brake disc."),
+    serviceAction("Front tyre change", "Wheels and tyres", ["Tyre and chassis inspection"], "Replace front tyre."),
+    serviceAction("Rear tyre change", "Wheels and tyres", ["Tyre and chassis inspection"], "Replace rear tyre."),
+    serviceAction("Tyre set change", "Wheels and tyres", ["Tyre and chassis inspection"], "Replace both tyres."),
+    serviceAction("Wheel bearing replacement", "Chassis", ["Tyre and chassis inspection", "Spoke and wheel inspection"], "Replace worn wheel bearings."),
+    serviceAction("Spoke tightening / wheel truing", "Chassis", ["Spoke and wheel inspection"], "Tighten spokes and true wheel where applicable."),
+    serviceAction("Fork oil change", "Suspension", ["Tyre and chassis inspection"], "Replace fork oil and service fork internals."),
+    serviceAction("Fork seal replacement", "Suspension", ["Tyre and chassis inspection"], "Replace leaking fork seals and dust seals."),
+    serviceAction("Battery replacement", "Electrical", [], "Replace motorcycle battery."),
+    serviceAction("Clutch adjustment", "Controls", [], "Adjust clutch cable/free play or hydraulic clutch feel."),
+    serviceAction("Clutch plate replacement", "Transmission", [], "Replace clutch plates and inspect basket/steels.")
+  ];
+}
+
+function getCommonServiceActions(serviceActions = getServiceActions()) {
+  return COMMON_SERVICE_ACTION_NAMES
+    .map((name) => serviceActions.find((item) => item.name === name))
+    .filter(Boolean);
+}
+
+function getAdditionalServiceActions(serviceActions = getServiceActions()) {
+  const commonNames = new Set(getCommonServiceActions(serviceActions).map((item) => item.name));
+  return serviceActions.filter((item) => !commonNames.has(item.name));
+}
+
+function getAccessoryActions() {
+  return ACCESSORY_ACTIONS;
+}
+
+function serviceAction(name, category, maintenanceNames, notes) {
+  return {
+    name,
+    category,
+    maintenanceTask: resolveMaintenanceTaskName(maintenanceNames),
+    notes
+  };
+}
+
+function accessoryAction(name, category, notes) {
+  return { name, category, notes };
+}
+
+function resolveMaintenanceTaskName(names) {
+  const templateNames = getTemplate().map((item) => item.name);
+  return names.find((name) => templateNames.includes(name)) || "";
+}
+
+function serviceActionByName(name) {
+  const target = String(name || "").toLowerCase();
+  return getServiceActions().find((item) => item.name.toLowerCase() === target) || null;
+}
+
+function accessoryActionByName(name) {
+  const target = String(name || "").toLowerCase();
+  return getAccessoryActions().find((item) => item.name.toLowerCase() === target) || null;
+}
+
+function matchServiceActionName(name) {
+  const compactName = compactMatch(name);
+  return getServiceActions().find((item) => {
+    const compactAction = compactMatch(item.name);
+    return compactName === compactAction || compactName.includes(compactAction) || compactAction.includes(compactName);
+  })?.name || "";
+}
+
+function matchAccessoryActionName(name) {
+  const compactName = compactMatch(name);
+  return getAccessoryActions().find((item) => {
+    const compactAction = compactMatch(item.name);
+    return compactName === compactAction || compactName.includes(compactAction) || compactAction.includes(compactName);
+  })?.name || "";
+}
+
 function renderService() {
-  const template = getTemplate();
   const dueTasks = getForecast().filter((item) => item.status !== "good").map((item) => item.name);
+  const serviceActions = getServiceActions();
+  const commonActions = getCommonServiceActions(serviceActions);
+  const additionalActions = getAdditionalServiceActions(serviceActions);
+  const accessoryActions = getAccessoryActions();
 
   return `
     <div class="stack">
       <section class="panel pad">
         <div class="section-title">
           <div>
-            <h2>Add service record</h2>
-            <p>Capture work done, itemized cost, invoice proof, and photo-backed odometer readings.</p>
+            <h2>Add accessory / service record</h2>
+            <p>Capture maintenance, accessories, modifications, itemized cost, invoice proof, and photo-backed odometer readings.</p>
           </div>
         </div>
         <form class="form-grid three service-form" data-form="service">
           ${field("Date", "date", todayIso(), "date")}
-          ${field("Workshop", "workshop", "", "text")}
+          ${field("Workshop / installer", "workshop", "", "text")}
           ${field("Odometer reading", "mileage", state.bike.currentMileage, "number")}
           ${field("Invoice total", "cost", "", "number")}
           ${field("Reading from dash photo", "photoMileage", "", "number")}
@@ -1650,17 +1844,39 @@ function renderService() {
             </div>
           </div>
           <label class="field full">
-            <span class="label">Completed tasks</span>
+            <span class="label">Work performed</span>
             <div class="check-grid">
-              ${template.map((item) => `
+              ${commonActions.map((item) => `
                 <label class="check-item itemized-task" data-service-task-row>
-                  <input type="checkbox" name="tasks" value="${escapeAttr(item.name)}" ${dueTasks.includes(item.name) ? "checked" : ""}>
-                  <span>${escapeHtml(item.name)}<small>${escapeHtml(item.category)} - ${item.intervalKm ? formatKm(item.intervalKm) : "date based"}</small></span>
+                  <input type="checkbox" name="tasks" value="${escapeAttr(item.name)}" data-maintenance-task="${escapeAttr(item.maintenanceTask)}" ${item.maintenanceTask && dueTasks.includes(item.maintenanceTask) ? "checked" : ""}>
+                  <span>${escapeHtml(item.name)}<small>${escapeHtml(item.category)}${item.maintenanceTask ? " - counts toward maintenance schedule" : ""}</small></span>
                   <input class="line-cost itemized-input" name="taskCosts" type="number" min="0" step="0.01" placeholder="Cost" data-cost-input>
                 </label>
               `).join("")}
             </div>
           </label>
+          <div class="field full">
+            <span class="label">Additional work</span>
+            <div class="service-action-picker">
+              <select name="additionalServiceAction" data-extra-service-select>
+                <option value="">Select another work item</option>
+                ${additionalActions.map((item) => `<option value="${escapeAttr(item.name)}">${escapeHtml(item.name)}</option>`).join("")}
+              </select>
+              <button class="button small" type="button" data-action="add-service-action">Add item</button>
+            </div>
+            <div class="service-extra-list" data-extra-service-list></div>
+          </div>
+          <div class="field full">
+            <span class="label">Accessories / modifications</span>
+            <div class="service-action-picker">
+              <select name="accessoryAction" data-accessory-select>
+                <option value="">Select accessory or modification</option>
+                ${accessoryActions.map((item) => `<option value="${escapeAttr(item.name)}">${escapeHtml(item.name)}</option>`).join("")}
+              </select>
+              <button class="button small" type="button" data-action="add-accessory-action">Add item</button>
+            </div>
+            <div class="service-extra-list" data-accessory-list></div>
+          </div>
           <div class="field full">
             <span class="label">Custom work</span>
             <div class="custom-task-list" data-custom-task-list>
@@ -1682,11 +1898,11 @@ function renderService() {
             </div>
           </div>
           <label class="field full">
-            <span>Service notes</span>
-            <textarea name="notes" placeholder="Parts used, fluid grade, problems found, warranty notes"></textarea>
+            <span>Accessory / service notes</span>
+            <textarea name="notes" placeholder="Parts used, fluid grade, accessory brand/model, warranty notes"></textarea>
           </label>
           <div class="form-actions">
-            <button class="button primary" type="submit">Save service record</button>
+            <button class="button primary" type="submit">Save log record</button>
           </div>
         </form>
       </section>
@@ -1703,11 +1919,11 @@ function renderServiceHistory() {
       <section class="panel pad">
         <div class="section-title">
           <div>
-            <h2>Service history</h2>
-            <p>${records.length} record${records.length === 1 ? "" : "s"} captured for ownership and resale proof.</p>
+            <h2>Accessory / Service Log</h2>
+            <p>${records.length} record${records.length === 1 ? "" : "s"} captured for maintenance, accessories, modifications, and resale proof.</p>
           </div>
         </div>
-        ${records.length ? renderRecordTable(records) : `<div class="empty">No records yet. Add the first service record above.</div>`}
+        ${records.length ? renderRecordTable(records) : `<div class="empty">No records yet. Add the first accessory or service record.</div>`}
       </section>
     </div>
   `;
@@ -1718,21 +1934,21 @@ function renderBulkServiceImport() {
     <section class="panel pad">
       <div class="section-title">
         <div>
-          <h2>Bulk service import</h2>
-          <p>Paste service history, review parsed drafts, edit anything uncertain, then save confirmed records.</p>
+          <h2>Bulk log import</h2>
+          <p>Paste service, accessory, or modification history, review parsed drafts, edit anything uncertain, then save confirmed records.</p>
         </div>
       </div>
       <form class="form-grid" data-form="bulk-service-import">
         <label class="field full">
-          <span>Service history text</span>
-          <textarea name="bulkServiceText" placeholder="2026-06-18, 18420 km, Apex Moto Works. Oil and filter SGD120, chain service SGD35. Total SGD155. Notes: OEM filter and Motul 10W-40."></textarea>
+          <span>Accessory / service history text</span>
+          <textarea name="bulkServiceText" placeholder="2026-06-18, 18420 km, Apex Moto Works. Oil and filter SGD120, top box SGD280. Total SGD400. Notes: OEM filter and 45L top box."></textarea>
         </label>
         <div class="bulk-actions">
           <button class="button small" type="button" data-action="use-sample-bulk-service">Use sample</button>
           <button class="button small danger" type="button" data-action="clear-bulk-service">Clear</button>
         </div>
         <div class="bulk-preview empty" data-bulk-service-preview>
-          Paste one or many service entries, then generate editable drafts.
+          Paste one or many log entries, then generate editable drafts.
         </div>
         <div class="form-actions">
           <button class="button" type="button" data-action="preview-bulk-service">Generate drafts</button>
@@ -1740,6 +1956,37 @@ function renderBulkServiceImport() {
         </div>
       </form>
     </section>
+  `;
+}
+
+function renderExtraServiceActionRow(actionName = "", cost = "") {
+  const item = serviceActionByName(actionName);
+  if (!item) return "";
+  return `
+    <div class="service-extra-row" data-extra-service-row data-service-action-name="${escapeAttr(item.name)}" data-maintenance-task="${escapeAttr(item.maintenanceTask)}">
+      <div class="service-extra-copy">
+        <strong>${escapeHtml(item.name)}</strong>
+        <small>${escapeHtml(item.category)}${item.maintenanceTask ? " - counts toward maintenance schedule" : ""}</small>
+      </div>
+      <input class="line-cost itemized-input" name="extraServiceCosts" type="number" min="0" step="0.01" placeholder="Cost" value="${escapeAttr(cost)}" data-cost-input>
+      <button class="button small danger" type="button" data-action="remove-service-action">Remove</button>
+    </div>
+  `;
+}
+
+function renderAccessoryActionRow(actionName = "", cost = "", remark = "") {
+  const item = accessoryActionByName(actionName);
+  if (!item) return "";
+  return `
+    <div class="service-extra-row accessory-row" data-accessory-row data-accessory-name="${escapeAttr(item.name)}" data-accessory-category="${escapeAttr(item.category)}">
+      <div class="service-extra-copy">
+        <strong>${escapeHtml(item.name)}</strong>
+        <small>${escapeHtml(item.category)}</small>
+      </div>
+      <input name="accessoryRemarks" type="text" placeholder="Brand / remark" value="${escapeAttr(remark)}">
+      <input class="line-cost itemized-input" name="accessoryCosts" type="number" min="0" step="0.01" placeholder="Cost" value="${escapeAttr(cost)}" data-cost-input>
+      <button class="button small danger" type="button" data-action="remove-accessory-action">Remove</button>
+    </div>
   `;
 }
 
@@ -1771,8 +2018,8 @@ function renderRecordTable(records) {
           <tr>
             <th>Date</th>
             <th>Mileage</th>
-            <th>Workshop</th>
-            <th>Tasks</th>
+            <th>Workshop / installer</th>
+            <th>Items</th>
             <th>Cost</th>
             <th>Proof</th>
             <th></th>
@@ -1802,12 +2049,22 @@ function renderRecordLineItems(record) {
     <div class="line-items">
       ${items.map((item) => `
         <div class="line-item">
-          <span>${escapeHtml(item.name)}</span>
+          <span>
+            ${escapeHtml(item.name)}
+            ${lineItemTypeLabel(item) ? `<small>${escapeHtml(lineItemTypeLabel(item))}</small>` : ""}
+            ${item.remark ? `<small>${escapeHtml(item.remark)}</small>` : ""}
+          </span>
           ${item.cost ? `<strong>${formatMoney(item.cost)}</strong>` : ""}
         </div>
       `).join("")}
     </div>
   `;
+}
+
+function lineItemTypeLabel(item) {
+  if (item.type === "accessory") return item.category ? `Accessory / mod - ${item.category}` : "Accessory / mod";
+  if (item.type === "custom") return "Custom";
+  return "";
 }
 
 function renderProofStrip(record) {
@@ -1844,14 +2101,14 @@ function renderForecast() {
           <strong>Next recommended service: ${nextPack.label}</strong>
           <p>${nextPack.tasks.map((item) => item.name).join(", ") || "No service items are currently due."}</p>
         </div>
-        <button class="button primary" data-view="service">Log service</button>
+        <button class="button primary" data-view="service">Add log</button>
       </section>
 
       <section class="panel pad">
         <div class="section-title">
           <div>
             <h2>Interval tracker</h2>
-            <p>Generated from your profile, current mileage, and service history.</p>
+            <p>Generated from your profile, current mileage, and accessory/service history.</p>
           </div>
         </div>
         <div class="table-wrap">
@@ -1955,8 +2212,8 @@ function renderAssistant() {
           </div>
           <div class="task-card">
             <div>
-              <strong>Service records</strong>
-              <p>${state.serviceRecords.length} logged workshop visit${state.serviceRecords.length === 1 ? "" : "s"}.</p>
+              <strong>Accessory / service records</strong>
+              <p>${state.serviceRecords.length} logged workshop or installer visit${state.serviceRecords.length === 1 ? "" : "s"}.</p>
             </div>
             <span class="pill info">History</span>
           </div>
@@ -1985,7 +2242,7 @@ function buildAssistantAnswer(question) {
   if (lower.includes("sell") || lower.includes("transfer") || lower.includes("owner")) {
     return `
       <h3>Sale readiness</h3>
-      <p>Your ${escapeHtml(state.bike.make)} ${escapeHtml(state.bike.model)} has a health score of ${health.score}/100 with ${state.serviceRecords.length} logged service records.</p>
+      <p>Your ${escapeHtml(state.bike.make)} ${escapeHtml(state.bike.model)} has a health score of ${health.score}/100 with ${state.serviceRecords.length} logged accessory/service records.</p>
       <ul>
         <li>Export the JSON ownership package from Transfer so the next owner receives structured records.</li>
         <li>Download the sale report for a human-readable history with workshops, mileage, costs, and notes.</li>
@@ -2043,7 +2300,7 @@ function renderAccount() {
               <strong>${escapeHtml(state.bike.year)} ${escapeHtml(state.bike.make)} ${escapeHtml(state.bike.model)}</strong>
             </div>
             <div>
-              <span>Service records</span>
+              <span>Accessory / service records</span>
               <strong>${state.serviceRecords.length}</strong>
             </div>
             <div>
@@ -2067,13 +2324,13 @@ function renderAccount() {
         <div class="section-title">
           <div>
             <h2>Create rider profile</h2>
-            <p>Move the current bike and service history into a local rider account.</p>
+            <p>Create a backend rider account and move the current bike and accessory/service history into it.</p>
           </div>
         </div>
         <form class="form-grid" data-form="register">
           ${field("Name", "name", "", "text")}
           ${field("Email", "email", "", "email")}
-          ${field("Passcode", "passcode", "", "password")}
+          ${field("Password", "password", "", "password")}
           <div class="form-actions">
             <button class="button primary" type="submit">Create account</button>
           </div>
@@ -2084,12 +2341,12 @@ function renderAccount() {
         <div class="section-title">
           <div>
             <h2>Sign in</h2>
-            <p>Load bikes, maintenance history, photos, and renewal dates saved to this browser.</p>
+            <p>Load bikes, maintenance history, accessory records, photos, and renewal dates saved to your rider account.</p>
           </div>
         </div>
         <form class="form-grid" data-form="login">
           ${field("Email", "email", "", "email")}
-          ${field("Passcode", "passcode", "", "password")}
+          ${field("Password", "password", "", "password")}
           <div class="form-actions">
             <button class="button primary" type="submit">Sign in</button>
           </div>
@@ -2212,6 +2469,14 @@ app.addEventListener("click", (event) => {
     startFresh();
   } else if (action === "delete-record") {
     deleteRecord(actionButton.dataset.id);
+  } else if (action === "add-service-action") {
+    addServiceActionRow(actionButton);
+  } else if (action === "remove-service-action") {
+    removeServiceActionRow(actionButton);
+  } else if (action === "add-accessory-action") {
+    addAccessoryActionRow(actionButton);
+  } else if (action === "remove-accessory-action") {
+    removeAccessoryActionRow(actionButton);
   } else if (action === "add-custom-task") {
     addCustomTaskRow(actionButton);
   } else if (action === "remove-custom-task") {
@@ -2320,17 +2585,38 @@ app.addEventListener("submit", (event) => {
   }
 });
 
-function registerAccount(form) {
+async function registerAccount(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   const name = cleanTextValue(data.name || "");
   const email = normalizeEmail(data.email);
-  const passcode = String(data.passcode || "");
+  const password = String(data.password || data.passcode || "");
 
-  if (!name || !email || passcode.length < 4) {
-    showToast("Enter a name, email, and passcode with at least 4 characters.");
+  if (!name || !email || password.length < 8) {
+    showToast("Enter a name, email, and password with at least 8 characters.");
     return;
   }
 
+  try {
+    const payload = await apiRequest("/api/auth/register", {
+      method: "POST",
+      body: { name, email, password, state }
+    });
+    applyBackendAuthPayload(payload);
+    activeView = "dashboard";
+    render();
+    showToast("Rider profile created and synced to the backend.");
+    return;
+  } catch (error) {
+    if (!isBackendUnavailable(error)) {
+      showToast(error.message || "Could not create rider profile.");
+      return;
+    }
+  }
+
+  registerLocalAccount({ name, email, password });
+}
+
+function registerLocalAccount({ name, email, password }) {
   const accounts = loadAccounts();
   if (accounts[email]) {
     showToast("That rider profile already exists. Sign in instead.");
@@ -2340,7 +2626,7 @@ function registerAccount(form) {
   accounts[email] = {
     name,
     email,
-    passcode,
+    passcode: password,
     createdAt: new Date().toISOString()
   };
   saveAccounts(accounts);
@@ -2352,14 +2638,36 @@ function registerAccount(form) {
   showToast("Rider profile created and current garage saved.");
 }
 
-function loginAccount(form) {
+async function loginAccount(form) {
   const data = Object.fromEntries(new FormData(form).entries());
   const email = normalizeEmail(data.email);
-  const passcode = String(data.passcode || "");
+  const password = String(data.password || data.passcode || "");
+
+  try {
+    const payload = await apiRequest("/api/auth/login", {
+      method: "POST",
+      body: { email, password }
+    });
+    applyBackendAuthPayload(payload);
+    activeView = "dashboard";
+    render();
+    showToast("Signed in and backend profile loaded.");
+    return;
+  } catch (error) {
+    if (!isBackendUnavailable(error)) {
+      showToast(error.message || "Could not sign in.");
+      return;
+    }
+  }
+
+  loginLocalAccount({ email, password });
+}
+
+function loginLocalAccount({ email, password }) {
   const account = loadAccounts()[email];
 
-  if (!account || account.passcode !== passcode) {
-    showToast("Email or passcode was not recognized.");
+  if (!account || account.passcode !== password) {
+    showToast("Email or password was not recognized.");
     return;
   }
 
@@ -2370,13 +2678,70 @@ function loginAccount(form) {
   showToast("Signed in and profile loaded.");
 }
 
-function logoutAccount() {
+async function logoutAccount() {
   saveState();
+  if (backendAuthAvailable) {
+    try {
+      await apiRequest("/api/auth/logout", { method: "POST" });
+    } catch (error) {
+      if (!isBackendUnavailable(error)) showToast("Signed out locally. Backend sign-out did not complete.");
+    }
+  }
   saveCurrentUser(null);
   state = loadState();
   activeView = "account";
   render();
   showToast("Signed out.");
+}
+
+function applyBackendAuthPayload(payload) {
+  backendAuthAvailable = true;
+  if (!payload?.user) return;
+  saveCurrentUser({
+    id: payload.user.id,
+    name: payload.user.name || payload.user.email,
+    email: payload.user.email
+  });
+  if (payload.state) {
+    state = normalizeState(payload.state);
+    saveStateLocalOnly();
+  } else if (payload.resources?.motorcycles?.length) {
+    state = normalizeState(stateFromBackendResources(payload.resources));
+    saveStateLocalOnly();
+  } else {
+    saveState();
+  }
+}
+
+function stateFromBackendResources(resources) {
+  const motorcycle = resources.motorcycles[0] || {};
+  const logRecords = (resources.logRecords || [])
+    .filter((record) => record.motorcycleId === motorcycle.id)
+    .map((record) => normalizeServiceRecord(record));
+
+  return {
+    ...starterState,
+    bike: {
+      ...starterState.bike,
+      ...motorcycle
+    },
+    manualNotes: motorcycle.manualNotes || starterState.manualNotes,
+    serviceRecords: logRecords
+  };
+}
+
+async function bootstrapBackendAuth() {
+  try {
+    const payload = await apiRequest("/api/auth/me");
+    applyBackendAuthPayload(payload);
+    render();
+  } catch (error) {
+    if (error.status === 401) {
+      backendAuthAvailable = true;
+      return;
+    }
+    backendAuthAvailable = false;
+  }
 }
 
 function insertBikePrompts(button) {
@@ -2640,11 +3005,11 @@ function useSampleBulkService(button) {
   const textarea = form?.querySelector('textarea[name="bulkServiceText"]');
   if (!textarea) return;
   textarea.value = [
-    "2025-09-10, 15120 km, Apex Moto Works. Engine oil and filter SGD118, brake inspection SGD28, chain clean SGD22. Total SGD168. Notes: Motul 10W-40, OEM filter, chain adjusted.",
+    "2025-09-10, 15120 km, Apex Moto Works. Engine oil and filter change SGD118, front brake pad replacement SGD90, chain clean SGD22. Total SGD230. Notes: Motul 10W-40, OEM filter, chain adjusted.",
     "",
-    "2026-02-18 @ 17180 km - Northside Garage - Chain lubrication SGD22; tyre and chassis inspection SGD20. Paid SGD42. Notes: Rear tyre at 45 percent. Front pads healthy.",
+    "2026-02-18 @ 17180 km - Northside Garage - Chain lubrication SGD22; rear tyre change SGD180; top box installation SGD280. Paid SGD482. Notes: Rear tyre replaced, 45L top box added.",
     "",
-    "18 Jun 2026, 18420km, Urban Moto Lab. Battery health check SGD35, oil change SGD120. Total SGD155."
+    "18 Jun 2026, 18420km, Urban Moto Lab. Battery replacement SGD135, oil change SGD120, coolant flush SGD95, exhaust pipe SGD620. Total SGD970."
   ].join("\n");
   previewBulkServiceImport(button);
 }
@@ -2669,7 +3034,7 @@ function previewBulkServiceImport(button) {
   const drafts = parseBulkServiceText(textarea.value);
   preview.className = drafts.length ? "bulk-preview" : "bulk-preview empty";
   preview.innerHTML = renderBulkServiceDrafts(drafts);
-  showToast(drafts.length ? `${drafts.length} draft record${drafts.length === 1 ? "" : "s"} generated.` : "No service records detected yet.");
+  showToast(drafts.length ? `${drafts.length} draft record${drafts.length === 1 ? "" : "s"} generated.` : "No accessory/service records detected yet.");
 }
 
 function saveBulkServiceImport(button) {
@@ -2687,7 +3052,7 @@ function saveBulkServiceImport(button) {
   if (maxMileage > Number(state.bike.currentMileage || 0)) state.bike.currentMileage = maxMileage;
   saveState();
   render();
-  showToast(`${records.length} service record${records.length === 1 ? "" : "s"} imported.`);
+  showToast(`${records.length} log record${records.length === 1 ? "" : "s"} imported.`);
 }
 
 function parseBulkServiceText(text) {
@@ -2774,7 +3139,7 @@ function renderBulkServiceDraft(draft, index) {
           <input name="bulkMileage" type="number" value="${escapeAttr(draft.mileage || "")}">
         </label>
         <label class="field">
-          <span>Workshop</span>
+          <span>Workshop / installer</span>
           <input name="bulkWorkshop" type="text" value="${escapeAttr(draft.workshop || "")}">
         </label>
         <label class="field">
@@ -2784,6 +3149,7 @@ function renderBulkServiceDraft(draft, index) {
       </div>
       <label class="field full">
         <span>Line items</span>
+        <small class="muted">Use name | cost | remark for accessory brand/model details.</small>
         <textarea name="bulkLineItems">${escapeHtml(lineItemsToBulkText(draft.lineItems))}</textarea>
       </label>
       <label class="field full">
@@ -2836,18 +3202,26 @@ function parseBulkLineItems(block, totalCost) {
   segments.forEach((segment) => {
     if (isMostlySummarySegment(segment)) return;
     const taskSignals = parseTaskSignals(segment);
+    const accessoryNames = parseAccessorySignals(segment);
     const cost = parseLineItemCostFromText(segment);
     const taskNames = [...taskSignals.taskNames, ...taskSignals.customTasks];
 
     taskNames.forEach((taskName) => {
       addLineItem(items, taskName, cost, taskSignals.taskNames.includes(taskName) ? "template" : "custom");
     });
+    accessoryNames.forEach((actionName) => {
+      addAccessoryLineItem(items, actionName, cost);
+    });
   });
 
   if (!items.length) {
     const taskSignals = parseTaskSignals(block);
+    const accessoryNames = parseAccessorySignals(block);
     [...taskSignals.taskNames, ...taskSignals.customTasks].forEach((taskName) => {
       addLineItem(items, taskName, 0, taskSignals.taskNames.includes(taskName) ? "template" : "custom");
+    });
+    accessoryNames.forEach((actionName) => {
+      addAccessoryLineItem(items, actionName, 0);
     });
   }
 
@@ -2864,12 +3238,19 @@ function parseBulkLineItemsText(text) {
       const explicitParts = line.split("|");
       const rawName = explicitParts.length > 1 ? explicitParts[0] : line.replace(/\b(?:sgd|usd|myr|eur|gbp|aud|thb|php|jpy|\$)?\s*[0-9]+(?:[.][0-9]{1,2})?\b/ig, "");
       const cost = explicitParts.length > 1 ? Number(explicitParts[1].replace(/[^0-9.]/g, "")) : parseCostFromText(line);
-      const matchedTask = matchTemplateTaskName(rawName) || parseTaskSignals(rawName).taskNames[0];
-      const name = cleanTextValue(matchedTask || rawName.replace(/[-:]+$/g, ""));
+      const remark = explicitParts.length > 2 ? cleanTextValue(explicitParts.slice(2).join(" | ")) : "";
+      const matchedAccessory = matchAccessoryActionName(rawName) || parseAccessorySignals(rawName)[0];
+      const matchedAction = matchedAccessory ? "" : matchServiceActionName(rawName) || parseTaskSignals(rawName).taskNames[0];
+      const matchedTask = matchedAction ? serviceActionByName(matchedAction)?.maintenanceTask : matchTemplateTaskName(rawName);
+      const accessory = matchedAccessory ? accessoryActionByName(matchedAccessory) : null;
+      const name = cleanTextValue(matchedAccessory || matchedAction || matchedTask || rawName.replace(/[-:]+$/g, ""));
       if (!name) return null;
       return {
         name,
-        type: matchedTask ? "template" : "custom",
+        type: matchedAccessory ? "accessory" : matchedAction ? "service-action" : matchedTask ? "template" : "custom",
+        maintenanceTask: matchedTask || "",
+        category: accessory?.category || "",
+        remark,
         cost: Number(cost || 0)
       };
     })
@@ -2878,7 +3259,7 @@ function parseBulkLineItemsText(text) {
 
 function lineItemsToBulkText(lineItems) {
   return (lineItems.length ? lineItems : [{ name: "General service", cost: 0 }])
-    .map((item) => `${item.name}${item.cost ? ` | ${item.cost}` : ""}`)
+    .map((item) => `${item.name}${item.cost || item.remark ? ` | ${item.cost || ""}` : ""}${item.remark ? ` | ${item.remark}` : ""}`)
     .join("\n");
 }
 
@@ -2888,7 +3269,30 @@ function addLineItem(items, name, cost, type) {
     if (!existing.cost && cost) existing.cost = cost;
     return;
   }
-  items.push({ name, type, cost: Number(cost || 0) });
+  const action = serviceActionByName(name);
+  items.push({
+    name,
+    type: action ? "service-action" : type,
+    maintenanceTask: action?.maintenanceTask || matchTemplateTaskName(name) || "",
+    cost: Number(cost || 0)
+  });
+}
+
+function addAccessoryLineItem(items, name, cost, remark = "") {
+  const existing = items.find((item) => item.name.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    if (!existing.cost && cost) existing.cost = cost;
+    if (!existing.remark && remark) existing.remark = remark;
+    return;
+  }
+  const accessory = accessoryActionByName(name);
+  items.push({
+    name,
+    type: "accessory",
+    category: accessory?.category || "",
+    remark,
+    cost: Number(cost || 0)
+  });
 }
 
 function parseBulkWorkshop(block) {
@@ -2925,7 +3329,7 @@ function parseBulkNotes(block) {
 
 function isMostlySummarySegment(segment) {
   return /\b(?:total|amount|paid|invoice|bill|receipt)\b/i.test(segment)
-    && !/\b(?:oil|chain|brake|tyre|tire|battery|coolant|spark|filter|valve|clutch|fork)\b/i.test(segment);
+    && !/\b(?:oil|chain|brake|tyre|tire|battery|coolant|spark|filter|valve|clutch|fork|exhaust|top\s*box|topbox|pannier|damper|shock|windshield|windscreen|slider|crash\s*bar|light|usb|phone|seat|handlebar|lever|ecu|tune|remap)\b/i.test(segment);
 }
 
 function hasDateSignal(text) {
@@ -2947,7 +3351,7 @@ async function saveService(form) {
     const lineItems = collectServiceLineItems(form, itemized);
 
     if (!lineItems.length) {
-      showToast("Choose at least one task or add a custom item.");
+      showToast("Choose at least one work item, accessory, or custom item.");
       return;
     }
 
@@ -2985,9 +3389,9 @@ async function saveService(form) {
     saveState();
     form.reset();
     render();
-    showToast("Service record saved.");
+    showToast("Log record saved.");
   } catch (error) {
-    showToast("Could not save this service record. Try smaller photos or fewer attachments.");
+    showToast("Could not save this log record. Try smaller photos or fewer attachments.");
   }
 }
 
@@ -2997,7 +3401,38 @@ function collectServiceLineItems(form, itemized) {
     const checkbox = row.querySelector('input[name="tasks"]');
     if (!checkbox?.checked) return;
     const cost = itemized ? Number(row.querySelector('input[name="taskCosts"]')?.value || 0) : 0;
-    items.push({ name: checkbox.value, type: "template", cost });
+    items.push({
+      name: checkbox.value,
+      type: "service-action",
+      maintenanceTask: checkbox.dataset.maintenanceTask || "",
+      cost
+    });
+  });
+
+  form.querySelectorAll("[data-extra-service-row]").forEach((row) => {
+    const name = row.dataset.serviceActionName || "";
+    if (!name) return;
+    const cost = itemized ? Number(row.querySelector('input[name="extraServiceCosts"]')?.value || 0) : 0;
+    items.push({
+      name,
+      type: "service-action",
+      maintenanceTask: row.dataset.maintenanceTask || "",
+      cost
+    });
+  });
+
+  form.querySelectorAll("[data-accessory-row]").forEach((row) => {
+    const name = row.dataset.accessoryName || "";
+    if (!name) return;
+    const remark = cleanTextValue(row.querySelector('input[name="accessoryRemarks"]')?.value || "");
+    const cost = itemized ? Number(row.querySelector('input[name="accessoryCosts"]')?.value || 0) : 0;
+    items.push({
+      name,
+      type: "accessory",
+      category: row.dataset.accessoryCategory || "",
+      remark,
+      cost
+    });
   });
 
   form.querySelectorAll("[data-custom-task-row]").forEach((row) => {
@@ -3008,6 +3443,78 @@ function collectServiceLineItems(form, itemized) {
   });
 
   return items;
+}
+
+function addServiceActionRow(button, actionName = "") {
+  const form = button.matches?.("form") ? button : button.closest("form");
+  if (!form) return false;
+  const select = form.querySelector("[data-extra-service-select]");
+  const selectedName = actionName || select?.value || "";
+  const action = findServiceActionForName(selectedName);
+
+  if (!action) {
+    showToast("Choose a work item to add.");
+    return false;
+  }
+
+  const visibleCheckbox = findTaskCheckbox(form, action.name);
+  if (visibleCheckbox && !visibleCheckbox.checked) {
+    visibleCheckbox.checked = true;
+    if (select) select.value = "";
+    updateItemizedSubtotal(form);
+    return true;
+  }
+
+  if (visibleCheckbox?.checked || findExtraServiceRow(form, action.name)) {
+    showToast("That work item is already selected.");
+    if (select) select.value = "";
+    return false;
+  }
+
+  const list = form.querySelector("[data-extra-service-list]");
+  if (!list) return false;
+  list.insertAdjacentHTML("beforeend", renderExtraServiceActionRow(action.name));
+  if (select) select.value = "";
+  updateItemizedSubtotal(form);
+  return true;
+}
+
+function removeServiceActionRow(button) {
+  const form = button.closest("form");
+  button.closest("[data-extra-service-row]")?.remove();
+  updateItemizedSubtotal(form);
+}
+
+function addAccessoryActionRow(button, actionName = "") {
+  const form = button.matches?.("form") ? button : button.closest("form");
+  if (!form) return false;
+  const select = form.querySelector("[data-accessory-select]");
+  const selectedName = actionName || select?.value || "";
+  const action = accessoryActionByName(selectedName);
+
+  if (!action) {
+    showToast("Choose an accessory or modification to add.");
+    return false;
+  }
+
+  if (findAccessoryRow(form, action.name)) {
+    showToast("That accessory or modification is already selected.");
+    if (select) select.value = "";
+    return false;
+  }
+
+  const list = form.querySelector("[data-accessory-list]");
+  if (!list) return false;
+  list.insertAdjacentHTML("beforeend", renderAccessoryActionRow(action.name));
+  if (select) select.value = "";
+  updateItemizedSubtotal(form);
+  return true;
+}
+
+function removeAccessoryActionRow(button) {
+  const form = button.closest("form");
+  button.closest("[data-accessory-row]")?.remove();
+  updateItemizedSubtotal(form);
 }
 
 function addCustomTaskRow(button) {
@@ -3094,6 +3601,7 @@ function extractServicePhotoFields(file, inputName) {
     fields: {},
     applied: [],
     taskNames: [],
+    accessoryNames: [],
     customTasks: []
   };
 
@@ -3114,6 +3622,7 @@ function extractServicePhotoFields(file, inputName) {
     const taskSignals = parseTaskSignals(text);
     detected.taskNames = taskSignals.taskNames;
     detected.customTasks = taskSignals.customTasks;
+    detected.accessoryNames = parseAccessorySignals(text);
   }
 
   if (!detected.fields.date && file?.lastModified) {
@@ -3153,11 +3662,13 @@ function applyServicePhotoExtraction(form, extraction) {
   }
 
   extraction.taskNames.forEach((taskName) => {
-    const checkbox = findTaskCheckbox(form, taskName);
-    if (checkbox && !checkbox.checked) {
-      checkbox.checked = true;
-      extraction.applied.push(["Task", taskName]);
-    }
+    const selectedName = ensureServiceAction(form, taskName);
+    if (selectedName) extraction.applied.push(["Task", selectedName]);
+  });
+
+  extraction.accessoryNames.forEach((actionName) => {
+    const selectedName = ensureAccessoryAction(form, actionName);
+    if (selectedName) extraction.applied.push(["Accessory", selectedName]);
   });
 
   extraction.customTasks.forEach((taskName) => {
@@ -3203,7 +3714,59 @@ function setInputValue(form, name, value, overwrite) {
 }
 
 function findTaskCheckbox(form, taskName) {
-  return Array.from(form.querySelectorAll('input[name="tasks"]')).find((checkbox) => checkbox.value === taskName);
+  const target = String(taskName || "").toLowerCase();
+  return Array.from(form.querySelectorAll('input[name="tasks"]')).find((checkbox) => {
+    return checkbox.value.toLowerCase() === target || String(checkbox.dataset.maintenanceTask || "").toLowerCase() === target;
+  });
+}
+
+function findServiceActionForName(name) {
+  const target = String(name || "").toLowerCase();
+  return getServiceActions().find((item) => {
+    return item.name.toLowerCase() === target || String(item.maintenanceTask || "").toLowerCase() === target;
+  }) || null;
+}
+
+function findExtraServiceRow(form, taskName) {
+  const target = String(taskName || "").toLowerCase();
+  return Array.from(form.querySelectorAll("[data-extra-service-row]")).find((row) => {
+    return String(row.dataset.serviceActionName || "").toLowerCase() === target
+      || String(row.dataset.maintenanceTask || "").toLowerCase() === target;
+  }) || null;
+}
+
+function findAccessoryRow(form, actionName) {
+  const target = String(actionName || "").toLowerCase();
+  return Array.from(form.querySelectorAll("[data-accessory-row]")).find((row) => {
+    return String(row.dataset.accessoryName || "").toLowerCase() === target;
+  }) || null;
+}
+
+function ensureServiceAction(form, taskName) {
+  const checkbox = findTaskCheckbox(form, taskName);
+  if (checkbox) {
+    if (checkbox.checked) return "";
+    checkbox.checked = true;
+    return checkbox.value;
+  }
+
+  const action = findServiceActionForName(taskName);
+  if (!action || findExtraServiceRow(form, action.name)) return "";
+
+  const list = form.querySelector("[data-extra-service-list]");
+  if (!list) return "";
+  list.insertAdjacentHTML("beforeend", renderExtraServiceActionRow(action.name));
+  return action.name;
+}
+
+function ensureAccessoryAction(form, actionName) {
+  const action = accessoryActionByName(actionName) || accessoryActionByName(matchAccessoryActionName(actionName));
+  if (!action || findAccessoryRow(form, action.name)) return "";
+
+  const list = form.querySelector("[data-accessory-list]");
+  if (!list) return "";
+  list.insertAdjacentHTML("beforeend", renderAccessoryActionRow(action.name));
+  return action.name;
 }
 
 function ensureCustomTask(form, taskName) {
@@ -3304,40 +3867,73 @@ function parseWorkshopFromFileName(text) {
 
 function parseTaskSignals(text) {
   const compact = compactMatch(text);
-  const signals = [
-    { keys: ["oil", "engineoil", "oilfilter", "oilchange"], task: "Engine oil and filter" },
-    { keys: ["chain", "chainslack", "chainlube"], task: "Chain clean, slack, and lubrication" },
-    { keys: ["brakefluid"], task: "Brake fluid replacement" },
-    { keys: ["brakepad", "brakeinspection", "brakes"], task: "Brake system inspection" },
-    { keys: ["airfilter"], task: "Air filter inspection" },
-    { keys: ["sparkplug", "sparkplugs"], task: "Spark plug replacement" },
-    { keys: ["coolant"], task: "Coolant replacement" },
-    { keys: ["valveclearance", "valves"], task: "Valve clearance inspection" },
-    { keys: ["tyre", "tire", "wheel", "chassis"], task: "Tyre and chassis inspection" },
-    { keys: ["finaldrive"], task: "Final drive oil change" },
-    { keys: ["spoke", "spokes"], task: "Spoke and wheel inspection" },
-    { keys: ["desmo"], task: "Desmo service inspection" }
-  ];
-  const templateTasks = getTemplate().map((item) => item.name);
+  const hasAny = (...keys) => keys.some((key) => compact.includes(key));
+  const serviceActions = new Set(getServiceActions().map((item) => item.name));
   const taskNames = [];
   const customTasks = [];
-  signals.forEach((signal) => {
-    if (!signal.keys.some((key) => compact.includes(key))) return;
-    const matchingTask = templateTasks.find((name) => name === signal.task || compactMatch(name).includes(compactMatch(signal.task)));
-    if (matchingTask && !taskNames.includes(matchingTask)) taskNames.push(matchingTask);
-    if (!matchingTask && !customTasks.includes(signal.task)) customTasks.push(signal.task);
-  });
+  const addTask = (task) => {
+    const bucket = serviceActions.has(task) ? taskNames : customTasks;
+    if (!bucket.includes(task)) bucket.push(task);
+  };
 
-  [
-    { keys: ["battery"], task: "Battery check" },
-    { keys: ["clutch"], task: "Clutch adjustment" },
-    { keys: ["forkseal", "forkseals"], task: "Fork seal inspection" },
-    { keys: ["tyrereplace", "tirereplace"], task: "Tyre replacement" }
-  ].forEach((signal) => {
-    if (signal.keys.some((key) => compact.includes(key)) && !customTasks.includes(signal.task)) customTasks.push(signal.task);
-  });
+  if (hasAny("forkseal", "forkseals")) addTask("Fork seal replacement");
+  if (hasAny("forkoil")) addTask("Fork oil change");
+  if (hasAny("finaldrive")) addTask("Final drive oil change");
+  if (hasAny("engineoil", "oilfilter", "oilchange") || (hasAny("oil") && !hasAny("forkoil", "finaldrive"))) addTask("Engine oil and filter change");
+
+  if (hasAny("chainsprocket", "sprocket")) addTask("Chain and sprocket replacement");
+  else if (hasAny("chain", "chainslack", "chainlube")) addTask("Chain clean, lubrication and slack adjustment");
+
+  if (hasAny("drivebelt", "belt")) addTask("Drive belt adjustment / replacement");
+  if (hasAny("brakefluid", "brakebleed", "brakebleeding")) addTask("Brake fluid bleeding / replacement");
+  if (hasAny("frontbrakepad", "frontpads")) addTask("Front brake pad replacement");
+  if (hasAny("rearbrakepad", "rearpads")) addTask("Rear brake pad replacement");
+  if (hasAny("brakepad", "brakepads", "pads") && !hasAny("frontbrakepad", "frontpads", "rearbrakepad", "rearpads")) addTask("Brake pad replacement");
+  if (hasAny("brakedisc", "rotor")) addTask("Brake disc replacement");
+
+  if (hasAny("airfilterrecharge", "filterrecharge")) addTask("Air filter recharge / clean and oil");
+  else if (hasAny("airfilter")) addTask("Air filter replacement");
+
+  if (hasAny("throttlebody", "throttleclean")) addTask("Throttle body cleaning");
+  if (hasAny("sparkplug", "sparkplugs")) addTask("Spark plug replacement");
+  if (hasAny("coolant", "coolantflush")) addTask("Coolant flush and replacement");
+  if (hasAny("valveclearance", "valves")) addTask("Valve clearance adjustment");
+  if (hasAny("desmo")) addTask("Desmo service");
+
+  if (hasAny("fronttyre", "fronttire")) addTask("Front tyre change");
+  if (hasAny("reartyre", "reartire")) addTask("Rear tyre change");
+  if (hasAny("tyreset", "tireset", "tyrereplace", "tirereplace") || (hasAny("tyre", "tire", "tyres", "tires") && !hasAny("fronttyre", "fronttire", "reartyre", "reartire"))) addTask("Tyre set change");
+  if (hasAny("wheelbearing")) addTask("Wheel bearing replacement");
+  if (hasAny("spoke", "spokes")) addTask("Spoke tightening / wheel truing");
+  if (hasAny("battery")) addTask("Battery replacement");
+  if (hasAny("clutchplate", "clutchplates")) addTask("Clutch plate replacement");
+  else if (hasAny("clutch")) addTask("Clutch adjustment");
 
   return { taskNames, customTasks };
+}
+
+function parseAccessorySignals(text) {
+  const compact = compactMatch(text);
+  const hasAny = (...keys) => keys.some((key) => compact.includes(key));
+  const accessoryNames = [];
+  const addAccessory = (name) => {
+    if (accessoryActionByName(name) && !accessoryNames.includes(name)) accessoryNames.push(name);
+  };
+
+  if (hasAny("exhaust", "slipon", "muffler", "fullsystem")) addAccessory("Exhaust pipe / slip-on installation");
+  if (hasAny("topbox", "topcase")) addAccessory("Top box installation");
+  if (hasAny("pannier", "panniers", "sidebox", "sideboxes", "luggagerack", "luggage")) addAccessory("Side panniers / luggage rack installation");
+  if (hasAny("steeringdamper", "stabilizer", "stabiliser") || (hasAny("damper", "dampers") && !hasAny("shock", "suspension"))) addAccessory("Steering damper installation");
+  if (hasAny("suspension", "rearshock", "shockupgrade", "forkcartridge")) addAccessory("Suspension / shock upgrade");
+  if (hasAny("crashbar", "crashbars", "frameslider", "framesliders", "engineslider", "engineguard")) addAccessory("Crash bars / frame sliders installation");
+  if (hasAny("windshield", "windscreen", "deflector")) addAccessory("Windshield / windscreen installation");
+  if (hasAny("auxlight", "auxlights", "auxiliarylight", "foglight", "spotlight")) addAccessory("Auxiliary lights installation");
+  if (hasAny("phonemount", "usbcharger", "quadlock", "navmount", "gpsmount")) addAccessory("Phone mount / USB charger installation");
+  if (hasAny("comfortseat", "replacementseat", "seatupgrade")) addAccessory("Seat replacement / comfort seat");
+  if (hasAny("handlebar", "riser", "brakelever", "clutchlever", "leverupgrade")) addAccessory("Handlebar / lever upgrade");
+  if (hasAny("ecutune", "remap", "fuelmap", "fuelmapping", "piggyback")) addAccessory("ECU tune / fuel mapping");
+
+  return accessoryNames;
 }
 
 function toTitleCase(value) {
@@ -3393,7 +3989,7 @@ function quickMileage() {
 }
 
 function startFresh() {
-  const confirmed = window.confirm("Start with a blank motorcycle profile and remove demo service records?");
+  const confirmed = window.confirm("Start with a blank motorcycle profile and remove demo accessory/service records?");
   if (!confirmed) return;
   motorcycleProfileEditing = false;
   mileagePanelOpen = false;
@@ -3423,12 +4019,12 @@ function startFresh() {
 }
 
 function deleteRecord(id) {
-  const confirmed = window.confirm("Delete this service record?");
+  const confirmed = window.confirm("Delete this log record?");
   if (!confirmed) return;
   state.serviceRecords = state.serviceRecords.filter((record) => record.id !== id);
   saveState();
   render();
-  showToast("Service record deleted.");
+  showToast("Log record deleted.");
 }
 
 function runAssistant(question) {
@@ -3479,7 +4075,7 @@ function copySummary() {
   const health = getHealth();
   const nextPack = getNextServicePack();
   const latest = sortedRecords()[0];
-  const summary = `${state.bike.year} ${state.bike.make} ${state.bike.model}, ${formatKm(state.bike.currentMileage)}, ${state.serviceRecords.length} logged service records. Health score ${health.score}/100 (${health.label}). Latest service: ${latest ? `${formatDate(latest.date)} at ${formatKm(latest.mileage)} by ${latest.workshop}` : "not logged"}. Next service: ${nextPack.label}.`;
+  const summary = `${state.bike.year} ${state.bike.make} ${state.bike.model}, ${formatKm(state.bike.currentMileage)}, ${state.serviceRecords.length} logged accessory/service records. Health score ${health.score}/100 (${health.label}). Latest log: ${latest ? `${formatDate(latest.date)} at ${formatKm(latest.mileage)} by ${latest.workshop}` : "not logged"}. Next service: ${nextPack.label}.`;
   navigator.clipboard?.writeText(summary)
     .then(() => showToast("Listing summary copied."))
     .catch(() => showToast(summary));
@@ -3507,9 +4103,9 @@ function buildSaleReportHtml() {
   <h1>${escapeHtml(state.bike.year)} ${escapeHtml(state.bike.make)} ${escapeHtml(state.bike.model)}</h1>
   <p><strong>Plate:</strong> ${escapeHtml(state.bike.plate || "Not set")} | <strong>VIN / Chassis number:</strong> ${escapeHtml(state.bike.vin || "Not set")} | <strong>Mileage:</strong> ${formatKm(state.bike.currentMileage)}</p>
   <p><span class="pill">Health score ${health.score}/100 - ${health.label}</span></p>
-  <h2>Service records</h2>
+  <h2>Accessory / service records</h2>
   <table>
-    <thead><tr><th>Date</th><th>Mileage</th><th>Workshop</th><th>Line items</th><th>Cost</th><th>Proof</th><th>Notes</th></tr></thead>
+    <thead><tr><th>Date</th><th>Mileage</th><th>Workshop / installer</th><th>Line items</th><th>Cost</th><th>Proof</th><th>Notes</th></tr></thead>
     <tbody>
       ${records.map((record) => `<tr><td>${formatDate(record.date)}</td><td>${formatKm(record.mileage)} ${record.mileageSource === "dashboard-photo" ? "(dash photo)" : ""}</td><td>${escapeHtml(record.workshop)}</td><td>${escapeHtml(getRecordLineItemSummary(record))}</td><td>${getRecordCost(record) ? formatMoney(getRecordCost(record)) : ""}</td><td>${record.attachments?.receipt?.dataUrl ? "Receipt photo. " : ""}${record.attachments?.dashboard?.dataUrl ? "Dash photo." : ""}</td><td>${escapeHtml(record.notes || "")}</td></tr>`).join("")}
     </tbody>
@@ -3571,3 +4167,4 @@ function escapeAttr(value) {
 }
 
 render();
+bootstrapBackendAuth();

@@ -835,6 +835,52 @@ td {
   margin-top: 0;
 }
 
+.service-action-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.service-extra-list {
+  display: grid;
+  gap: 8px;
+}
+
+.service-action-picker + .service-extra-list {
+  margin-top: 8px;
+}
+
+.service-extra-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.accessory-row {
+  grid-template-columns: minmax(0, 1fr) minmax(160px, 0.8fr) 140px auto;
+}
+
+.service-extra-copy {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+}
+
+.service-extra-copy strong,
+.service-extra-copy small {
+  display: block;
+}
+
+.service-extra-copy small {
+  margin-top: 2px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
 .custom-task-list {
   display: grid;
   gap: 8px;
@@ -979,7 +1025,15 @@ td {
 }
 
 .line-item span {
+  display: block;
   overflow-wrap: anywhere;
+}
+
+.line-item small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
 .proof-strip {
@@ -1219,6 +1273,8 @@ td {
     flex-direction: column;
   }
 
+  .service-action-picker,
+  .service-extra-row,
   .itemized-task,
   .custom-task-row,
   .bulk-draft-grid {
